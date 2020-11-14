@@ -1,18 +1,19 @@
 import time
+from datetime import datetime
 from picamera import PiCamera
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets  import RectangleSelector
 import cv2
 import imutils
 import pickle
-import os.path
+import os
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.http import MediaFileUpload
 
 gdfolder = '1crBqym6aiqByFbqcQn0pJkt2YRWDbVz7'
+num_pictures = 2
 
 #######################################################
 # GDrive authorization
@@ -40,112 +41,131 @@ drive = build('drive', 'v3', credentials=creds)
 # motion file setup
 ######################################################
 # grab list of files that already exist
-results = drive.files().list(fields="files(id, name)", q="'1crBqym6aiqByFbqcQn0pJkt2YRWDbVz7' in parents").execute()['files']
-gfiles = [results[ii]['id'] for ii in range(len(results)) if results[ii]['name'].startswith('motion_')]
+results = drive.files().list(fields="files(id, name)", q="'1crBqym6aiqByFbqcQn0pJkt2YRWDbVz7' in parents", orderBy='name').execute()['files']
+gfiles = [results[ii]['id'] for ii in range(len(results)) if results[ii]['name'].startswith('motion')]
 
 # make new placeholder files if necessary
-for ii in range(len(gfiles), 10):
+for ii in range(len(gfiles), num_pictures):
     rc = cv2.imwrite('motion.jpg', (np.random.rand(200,300,3)*255).astype(int))
     media = MediaFileUpload('motion.jpg', mimetype='image/jpg')
-    gfile = drive.files().create(body={'name': 'motion_%s.jpg'%str(ii), 'parents':[gdfolder]}, media_body=media, fields='id').execute()
+    gfile = drive.files().create(body={'name': 'motion_%s.jpg' % str("{0:0=4d}".format(ii)), 'parents':[gdfolder]}, media_body=media, fields='id').execute()
     gfiles += [gfile]
+    
 
+##########################################
+# configuration setup
+##########################################
+box = (190, 1280, 600, 775)
+tdelay = 0.5  # seconds
 
-fig, ax = plt.subplots()
-def line_select_callback(eclick, erelease):
-    x1, y1 = eclick.xdata, eclick.ydata
-    x2, y2 = erelease.xdata, erelease.ydata
-    rect = plt.Rectangle( (min(x1,x2),min(y1,y2)), np.abs(x1-x2), np.abs(y1-y2) )
-    ax.add_patch(rect)
+# calibration
+# need to measure and calibrate
+# wag is 400 pixels = 50 ft
+pixels_per_foot = 400.0/40.0
+pixels_per_mile = pixels_per_foot * 5280.0
+depth_adjust = 0.2  # %, cars going left to right are closer
+
+# debug
+debug = False
+
+frameb = None
+prev_cutout = None
+prev_center = None
+snapshot = np.empty((1024, 1280, 3), dtype=np.uint8)
+gg = 0
+
+start = time.time()
+
+#fig, ax = plt.subplots(figsize=(14, 14))
+#ax.imshow(background)
 
 
 #####################################################
 # grab camera hardware and monitor
 #####################################################
-print('monitoring...')
-snapshot = np.empty((1024, 1280, 3), dtype=np.uint8)
-background = None
-box = (0, 1280, 0, 1024)
-gg = 0
-state = 0  # 0 - no motion, 1 - initial motion, >1 - subsequent motion
-prev_center, prev_timestamp = np.array([0,0]), 0.0
-
-with PiCamera() as camera:
+with PiCamera(resolution=(1280, 1024)) as camera:
+    #camera.zoom = (box[0]/1280, box[2]/1024, box[1]/1280, box[3]/1024)
     time.sleep(2)
     try:
-        while True:
-            time.sleep(0.5) 
-            camera.capture(snapshot, format='bgr', use_video_port=True, resize=(1280, 1024))
+        while True:  #for ii in range(num_pictures):
             
-            # initialize things
-            if background is None:
-                ax.imshow(snapshot)
-                rs = RectangleSelector(ax, line_select_callback, drawtype='box', rectprops=dict(fill=False), 
-                                       minspanx=5, minspany=5, spancoords='data', interactive=False)
-                plt.show()
-                box = [int(ii) for ii in rs.extents]
-                print(box)
+            # take a picture
+            time.sleep(tdelay)
+            shot_time = time.time()
+            camera.capture(snapshot, format='bgr', use_video_port=True)
             
-            cutout = snapshot[box[2]:box[3], box[0]:box[1]]
-            frame = cv2.cvtColor(cutout, cv2.COLOR_BGR2GRAY)
-            frame = cv2.GaussianBlur(frame, (21, 21), 0)
+            cutout = np.array(snapshot[box[2]:box[3], box[0]:box[1]])
             
-            if background is None:
-                background = frame.copy().astype('float')
-                
             # compute the difference between the current frame and running average
-            frameDelta = cv2.absdiff(frame, cv2.convertScaleAbs(background))
+            frame = cv2.cvtColor(cutout, cv2.COLOR_BGR2GRAY)
+            frame = cv2.GaussianBlur(frame, (31, 31), 0)
+            
+            if frameb is None: frameb = np.array(frame)
+            
+            frameDelta = cv2.absdiff(frameb, frame)
             
             # threshold the delta image, dilate the thresholded image to fill in holes,
             # then find contours on thresholded image
-            thresh = cv2.threshold(frameDelta, 10, 255, cv2.THRESH_BINARY)[1]
-            thresh = cv2.dilate(thresh, None, iterations=2)
-            cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cnts = imutils.grab_contours(cnts)
+            thresh = cv2.threshold(frameDelta, 30, 255, cv2.THRESH_BINARY)[1]
+            thresh = cv2.dilate(thresh, None, iterations=8)
+            rawcnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            rawcnts = imutils.grab_contours(rawcnts)
+            areas = [cv2.contourArea(cc) for cc in rawcnts]
             
-            # look for large contour areas
-            motion, upload = False, False
-            for cc in cnts:
-                if cv2.contourArea(cc) < 300:
-                    continue
-
-                # can't deal with multiple things moving at once
-                if motion == True:
-                    motion = False
-                    break
+            # look for one large motion contour area
+            if (len(areas) >= 1) and (areas[np.argmax(areas)] > 2600):
+                cc = rawcnts[np.argmax(areas)]
                 
                 # compute the bounding box for the contour, draw it on the frame, and update the text
-                motion = True
                 (xx, yy, ww, hh) = cv2.boundingRect(cc)
                 center = np.array([xx + ww//2, yy + hh//2])
-                timestamp = time.time()
                 rc = cv2.rectangle(cutout, (xx, yy), (xx + ww, yy + hh), (0, 255, 0), 2)
-                #snapshot[box[2]:box[3], box[0]:box[1]] = cutout
             
-            # initial motion
-            if motion and state == 0:
-                state = 1
-                prev_center = center
-                prev_timestamp = timestamp
-            
-            # last frame also had motion
-            elif motion and state == 1:
-                distance = np.sqrt(np.sum( np.square(center - prev_center) ))
-                timedelta = timestamp - prev_timestamp
+                # if we had a large motion contour area in the previous frame as well
+                if prev_center is not None:
                 
-                print('motion detected...distance of {:1.0f} in {:3.1f} seconds'.format(distance, timedelta))
-                rc = cv2.imwrite('motion.jpg', cutout)
-                media = MediaFileUpload('motion.jpg', mimetype='image/jpg')
-                gfile = drive.files().update(fileId=gfiles[gg], media_body=media).execute()
-                gg = (gg + 1) % 10
-                #rc = plt.imshow(cutout)
-                #plt.show()
+                    # convert pixel distance to real world distance
+                    distance = np.abs(center[0] - prev_center[0])             # in pixels
+                    distance = distance / pixels_per_mile                     # in miles
+                    speed = distance / ((shot_time-prev_shot_time)/3600)  # in miles per hour
+                    
+                    # adjust speed for cars in near lane (left to right)
+                    if prev_center[0] < center[0]:
+                        speed = speed * (1.0 - depth_adjust)
+                
+                    imtxt = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '  ' + 'speed estimate = {:1.1f} mph'.format(speed)
+                    print('motion detected in image ' + str(gg) + '...' + imtxt, end='\r')
+                
+                    # blend the snapshots and add space for text annotation
+                    if debug:
+                        print('')
+                        print(shot_time-prev_shot_time)
+                        two_frame = cv2.addWeighted(prev_cutout, 0.5, cutout, 0.5, 0.0)
+                        two_frame = np.concatenate((np.tile(frameDelta[...,None],3), np.tile(thresh[...,None],3), 
+                                                    two_frame, np.zeros((80,cutout.shape[1],3), dtype=int)+255), axis=0)
+                    else:
+                        two_frame = np.concatenate((prev_cutout, np.zeros((10,cutout.shape[1],3), dtype=int)+255, cutout, 
+                                                    np.zeros((80,cutout.shape[1],3), dtype=int)+255), axis=0)
+                
+                    # only upload fast moving objects
+                    if speed > 15.0:
+                        cv2.putText(two_frame, imtxt, (10,two_frame.shape[0]-30), cv2.FONT_HERSHEY_DUPLEX, 1, 0)                
+                        rc = cv2.imwrite('pictures/motion' + str(gg) + '.jpg', two_frame)               
+                        media = MediaFileUpload('pictures/motion' + str(gg) + '.jpg', mimetype='image/jpg')
+                        gfile = drive.files().update(fileId=gfiles[gg], media_body=media).execute()
+                        gg = (gg + 1) % num_pictures
+                
+                # save this motion contour area for next frame comparison 
+                prev_center = center
+                prev_cutout = cutout
             
-            # no motion
-            else:  # accumulate more background
-                state = 0
-                rc = cv2.accumulateWeighted(frame, background, 0.5)
-    
+            # no large motion contour area
+            else:
+                prev_center = None
+                prev_cutout = None
+                frameb = np.array(frame)
+            
+            prev_shot_time = shot_time
+                
     except KeyboardInterrupt:
         pass
-
