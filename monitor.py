@@ -76,9 +76,6 @@ gg = 0
 
 start = time.time()
 
-#fig, ax = plt.subplots(figsize=(14, 14))
-#ax.imshow(background)
-
 
 #####################################################
 # grab camera hardware and monitor
@@ -110,11 +107,11 @@ with PiCamera(resolution=(1280, 1024)) as camera:
             thresh = cv2.dilate(thresh, None, iterations=8)
             rawcnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             rawcnts = imutils.grab_contours(rawcnts)
-            areas = [cv2.contourArea(cc) for cc in rawcnts]
+            large_areas = [cc for cc in rawcnts if cv2.contourArea(cc) > 3000]
             
             # look for one large motion contour area
-            if (len(areas) >= 1) and (areas[np.argmax(areas)] > 2600):
-                cc = rawcnts[np.argmax(areas)]
+            if len(large_areas) == 1:
+                cc = large_areas[0]
                 
                 # compute the bounding box for the contour, draw it on the frame, and update the text
                 (xx, yy, ww, hh) = cv2.boundingRect(cc)
@@ -147,13 +144,23 @@ with PiCamera(resolution=(1280, 1024)) as camera:
                         two_frame = np.concatenate((prev_cutout, np.zeros((10,cutout.shape[1],3), dtype=int)+255, cutout, 
                                                     np.zeros((80,cutout.shape[1],3), dtype=int)+255), axis=0)
                 
-                    # only upload fast moving objects
-                    if speed > 15.0:
+                    # save things moving faster than people
+                    if speed > 10.0:
                         cv2.putText(two_frame, imtxt, (10,two_frame.shape[0]-30), cv2.FONT_HERSHEY_DUPLEX, 1, 0)                
-                        rc = cv2.imwrite('pictures/motion' + str(gg) + '.jpg', two_frame)               
-                        media = MediaFileUpload('pictures/motion' + str(gg) + '.jpg', mimetype='image/jpg')
-                        gfile = drive.files().update(fileId=gfiles[gg], media_body=media).execute()
-                        gg = (gg + 1) % num_pictures
+                        fname = 'pictures/' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '__{:1.1f}mph.jpg'.format(speed)
+                        rc = cv2.imwrite(fname, two_frame)
+                    
+                        # only upload fast moving objects
+                        if speed > 32.0:
+                            try:
+                                media = MediaFileUpload(fname, mimetype='image/jpg')
+                                gfile = drive.files().update(fileId=gfiles[gg], media_body=media).execute()
+                            except:
+                                pass
+                            gg = (gg + 1) % num_pictures
+                        
+                    elif speed < 2:  # good chance we are hung on an incorrect background
+                        frameb = np.array(frame)
                 
                 # save this motion contour area for next frame comparison 
                 prev_center = center
