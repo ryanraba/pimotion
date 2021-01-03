@@ -107,7 +107,7 @@ with PiCamera(resolution=(1280, 1024)) as camera:
             thresh = cv2.dilate(thresh, None, iterations=8)
             rawcnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             rawcnts = imutils.grab_contours(rawcnts)
-            large_areas = [cc for cc in rawcnts if cv2.contourArea(cc) > 3000]
+            large_areas = [cc for cc in rawcnts if cv2.contourArea(cc) > 3500]
             
             # look for one large motion contour area
             if len(large_areas) == 1:
@@ -138,26 +138,31 @@ with PiCamera(resolution=(1280, 1024)) as camera:
                         print('')
                         print(shot_time-prev_shot_time)
                         two_frame = cv2.addWeighted(prev_cutout, 0.5, cutout, 0.5, 0.0)
-                        two_frame = np.concatenate((np.tile(frameDelta[...,None],3), np.tile(thresh[...,None],3), 
-                                                    two_frame, np.zeros((80,cutout.shape[1],3), dtype=int)+255), axis=0)
+                        two_frame = np.concatenate((np.tile(frameDelta[...,None],3), np.tile(thresh[...,None],3), two_frame, 
+                                                    np.zeros((80,cutout.shape[1],3), dtype=int)+255), axis=0)
                     else:
                         two_frame = np.concatenate((prev_cutout, np.zeros((10,cutout.shape[1],3), dtype=int)+255, cutout, 
                                                     np.zeros((80,cutout.shape[1],3), dtype=int)+255), axis=0)
                 
-                    # save things moving faster than people
+                    # write a log entry
                     if speed > 10.0:
+                        with open('pilog.csv', 'a') as fid:
+                            fid.write('%s, %s\n' % (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '{:1.1f}mph.jpg'.format(speed)))
+                    
+                    # only upload fast moving objects     
+                    if speed > 35.0:
                         cv2.putText(two_frame, imtxt, (10,two_frame.shape[0]-30), cv2.FONT_HERSHEY_DUPLEX, 1, 0)                
                         fname = 'pictures/' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '__{:1.1f}mph.jpg'.format(speed)
                         rc = cv2.imwrite(fname, two_frame)
                     
-                        # only upload fast moving objects
-                        if speed > 32.0:
-                            try:
-                                media = MediaFileUpload(fname, mimetype='image/jpg')
-                                gfile = drive.files().update(fileId=gfiles[gg], media_body=media).execute()
-                            except:
-                                pass
-                            gg = (gg + 1) % num_pictures
+                        try:
+                            media = MediaFileUpload(fname, mimetype='image/jpg')
+                            gfile = drive.files().update(fileId=gfiles[gg], media_body=media).execute()
+                        except:
+                            pass
+                        
+                        gg = (gg + 1) % num_pictures
+                        time.sleep(1)  # simulate upload delay
                         
                     elif speed < 2:  # good chance we are hung on an incorrect background
                         frameb = np.array(frame)
