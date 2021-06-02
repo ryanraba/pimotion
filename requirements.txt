@@ -37,4 +37,4 @@ scipy==1.4.1
 six==1.15.0
 tifffile==2020.6.3
 uritemplate==3.0.1
-urllib3==1.25.9
+urllib3==1.26.5
